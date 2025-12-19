@@ -1158,6 +1158,289 @@ def pay_to_point(request):
     <input type="submit"/>
 </form>
 ```
+- Flask CSRF 사례 추가하기
 ---
-* Flask CSRF 사례 추가하기
+
+### 12. 서버사이드 요청 위조
+
+1_ 조작한 요청을 전송한다.
+2_ 조작한 요청을 처리한다.
+3_ 조작된 요청을 대상 서버에 전달한다.
+4_ 의도하지 않은 내부 리소스가 노출된다.
+
+일반적인 상황에서는 신뢰된 내부 자원에 접근할 수 없다.
+ 
+
+적절한 검증 절차를 거치지 않은 **사용자 입력값을 내부 서버 간 요청에 사용하는 경우**, 악의적인 행위가 발생할 수 있는 보안 약점이 된다. 
+외부에 노출된 웹 서버가 취약한 애플리케이션을 포함하고 있는 경우, 공격자는 **URL 또는 요청문을 위조해 접근 통제**를 우회할 수 있다. 이 과정에서 **비정상적인 동작을 유도하거나, 신뢰된 네트워크 내부에 있는 데이터**를 획득할 수 있다.
+
+안전한 코딩 기법
+
+안전한 코딩 기법은 다음과 같다. 식별 가능한 범위 내에서 **사용자 입력값을 다른 시스템의 서비스 호출에 사용하는 경우**, **사용자 입력값을 화이트리스트 방식으로 필터링**해야 한다.
+부득이하게 **사용자가 지정하는 무작위 URL을 받아들여야 하는 경우**에는 **내부 URL을 블랙리스트로 지정해 필터링**해야 한다.**(화이트리스트는 미리 정해둔 안전한 것만 통과시키는 목록이고, 블랙리스트는 위험하다고 알려진것만 골라서 막는 목록이다.)
+** 또한 **동일한 내부 네트워크**에 있더라도 **기기 인증과 접근 권한을 확인한 뒤 요청**이 이루어지도록 해야 한다.
+
+참고로 다음과 같은 **삽입 코드 예제**가 존재한다.
+- **내부망 중요 정보 획득 예시**이다.
+http://sample_site.com/connect?url=[http://192.168.0.45/member/list.json](http://192.168.0.45/member/list.json)
+
+- **외부 접근이 차단된 admin 페이지 접근 예시**이다.
+http://sample_site.com/connect?url=[http://192.168.0.45/admin](http://192.168.0.45/admin)
+
+- **도메인 체크를 우회해 중요 정보를 획득하는 예시**이다.
+http://sample_site.com/connect?url=http://sample_site.com:x@192.168.0.45/member/list.json
+
+- **단축 URL을 이용해 필터링을 우회하는 예시**이다.
+http://sample_site.com/connect?url=[http://bit.ly/sdjk3kjkl3](http://bit.ly/sdjk3kjkl3)
+
+- **도메인을 사설 IP로 설정해 중요 정보를 획득하는 예시**이다.
+http://sample_site.com/connect?url=[http://192.168.0.45/member/list.json](http://192.168.0.45/member/list.json)
+
+- **서버 내 파일을 열람하는 예시**이다.
+http://sample_site.com/connect?url=file:///etc/passwd
+
+사용자로부터 **입력된 URL 주소를 검증 없이 사용**하면, **의도하지 않은 다른 서버의 자원에 접근**할 수 있다.
+
+
+안전하지 않은 코드 
+```python
+import requests
+
+def call_third_party_api(request):
+    addr = request.POST.get('address', '')
+    # 사용자가 입력한 주소를 검증하지 않고 HTTP 요청을 보낸 후 응답을 사용자에게 반환
+    result = requests.get(addr).text
+    return render(request, 'result.html', {'result': result})
+```
+
+안전한코드예시
+**사전에 정의된 서버 목록을 사용**하면, 매칭되는 URL만 사용할 수 있어 URL 값을 임의로 조작할 수 없다. **도메인을 화이트리스트로 정의**한다. 
+다만 화이트리스트 방식은 **DNS Rebinding 공격 등에 노출될 위험**이 있으므로, **신뢰할 수 있는 자원의 IP를 기준으로 검증하는 방식**이 더 안전하다.
+
+```python
+ALLOW_SERVER_LIST = [
+    'https://127.0.0.1/latest',
+    'https://192.168.0.1/user_data',
+    'https://192.168.0.100/v1/public',
+]
+
+def call_third_party_api(request):
+    addr = request.POST.get('address', '')
+    # 사용자가 입력한 URL을 화이트리스트로 검증
+    if addr not in ALLOW_SERVER_LIST:
+        return render(request, 'error.html', {'error': '허용되지 않은 서버입니다.'})
+
+    result = requests.get(addr).text
+    return render(request, 'result.html', {'result': result})
+```
+---
+
+### 13. HTTP 응답 분할 취약점 
+
+**HTTP 요청에 인젝션 코드가 삽입**될 수 있다. **요청 파라미터가 응답 헤더에 포함**되면 문제가 발생한다. 이로 인해 **HTTP 응답이 분할**된다.
+HTTP 요청 내 **파라미터가 HTTP 응답 헤더에 포함**되어 **사용자에게 다시 전달**될 때, **입력값에 CR(Carriage Return)이나 LF(Line Feed)와 같은 개행 문자가 존재**하면 **HTTP 응답이 두 개 이상으로 분리**될 수 있다.
+이 경우 공격자는 **개행 문자를 이용해 첫 번째 응답을 종료**시키고, **두 번째 응답에 악성 코드를 주입해 XSS 공격이나 캐시 오염(Cache Poisoning) 공격**을 수행할 수 있다.
+파이썬 3.9.5 이상 버전의 **URLValidator에서 HTTP 응답 분할 취약점이 보고**된 바 있으며, 해당 라이브러리를 사용하는 **Django 버전에도 영향을 미친다.**
+HTTP 응답 분할 공격으로부터 애플리케이션을 안전하게 보호하려면 **최신 버전의 라이브러리와 프레임워크를 사용**해야 한다.또한 **외부 입력값에 대해서는 철저한 검증 작업**이 필요하다.
+
+안전한 코딩 기법
+**요청 파라미터 값을 HTTP 응답 헤더에 포함**시키는 경우 **CR(\r), LF(\n)와 같은 개행 문자를 제거**해야 한다. 
+외부 입력값이 **헤더, 쿠키, 로그 등에 사용될 경우 항상 개행 문자를 검증**해야 한다. 가능하다면 **헤더에 사용되는 예약어를 화이트리스트로 제한**하는 것이 좋다.
+
+안전하지 않은 코드 예시
+
+```python
+from django.http import HttpResponse
+
+def route(request):
+    content_type = request.POST.get('content-type')
+    # 외부 입력값을 검증하지 않고 응답 헤더에 포함
+    res = HttpResponse()
+    res['Content-Type'] = content_type
+    return res
+```
+안전한코드예시
+
+**응답 분할을 예방하려면 \r, \n 같은 문자를 치환하거나 예외 처리**해야 한다.
+
+```python
+def route(request):
+    content_type = request.POST.get('content-type')
+    content_type = content_type.replace('\r', '')
+    content_type = content_type.replace('\n', '')
+
+    res = HttpResponse()
+    res['Content-Type'] = content_type
+    return res
+```
+ 
+---
+
+### 14.정수형 오버플로우
+
+**정수형 오버플로우**는 **정수형 크기가 고정된 상태**에서 **변수가 저장할 수 있는 범위를 넘어선 값을 저장**하려 할 때, **실제 저장되는 값이 의도치 않게 아주 작은 수 또는 음수가 되어 프로그램이 예기치 않게 동작하는 취약점**이다.
+특히 **반복문 제어, 메모리 할당, 메모리 복사** 등의 조건에 **사용자 입력값이 사용**되고 그 과정에서 **오버플로우가 발생**하면 **보안상 문제가 유발**될 수 있다.
+
+파이썬 2.x에서는 **int 타입 변수의 값이 표현 가능한 범위를 넘어서면 자동으로 long 타입으로 변경**해 범위를 확장한다.
+파이썬 3.x에서는 **long 타입을 없애고 int 타입만 유지**하되, **정수 타입에 Arbitrary-precision arithmetic 방식을 사용해 오버플로우가 발생하지 않는다.**
+하지만 파이썬 3.x에서도 **pydata stack을 사용하는 패키지**를 사용할 때는 **C언어와 동일하게 정수형 데이터가 처리**될 수 있으므로 **오버플로우 발생에 유의**해야 한다.
+이처럼 언어 자체에서는 안전성을 보장하더라도, **특정 취약점에 취약한 패키지나 라이브러리를 사용하는 것에 주의**해야 한다.
+
+안전한 코딩 기법
+파이썬 자료형이 아니라 **패키지에서 제공하는 데이터 타입을 사용할 경우**, **해당 데이터 타입의 표현 방식과 최대 크기를 반드시 확인**해야 한다.
+**NumPy는 기본적으로 64비트 길이의 정수형 변수를 사용**한다.
+또한 **표현할 수 없는 큰 숫자를 문자열 형식(object)으로 변환하는 기능을 제공**한다.
+하지만 64비트를 넘어서는 크기의 숫자는 제대로 처리하지 못할 수 있다.
+따라서 **값 할당 전에 최소값과 최대값을 확인**하고, **범위를 넘어서는 값을 할당하지 않는지 테스트**해야 한다.
+
+안전하지 않은 코드 예시
+
+**거듭제곱을 계산해 그 결과를 반환하는 함수 예시**에서는, **계산 가능한 숫자에 대한 검증이 없어** 에러는 발생하지 않더라도 반환값을 처리하는 과정에서 예기치 않은 오류가 발생할 수 있다.
+
+
+```python
+import numpy as np
+
+def handle_data(number, pow_value):
+    res = np.power(number, pow_value, dtype=np.int64)
+    # 64비트를 넘어서는 숫자와 지수가 입력되면 오버플로우가 발생해 결과가 0이 될 수 있다.
+    return res
+```
+**오버플로우를 예방**하려면 **입력하는 값이 사용하는 데이터 타입의 최소값보다 작거나 최대값보다 큰지 확인**해야 한다.
+계산이 필요한 경우에는 오버플로우가 발생하지 않는 **파이썬 기본 자료형으로 먼저 계산**하고, 그 결과를 검사해 **오버플로우 여부를 확인**해야 한다.
+
+```python
+import numpy as np
+
+MAX_NUMBER = np.iinfo(np.int64).max
+MIN_NUMBER = np.iinfo(np.int64).min
+
+def handle_data(number, pow_value):
+    calculated = number ** pow_value
+
+    # 파이썬 기본 자료형으로 계산 후 범위 검사
+    if calculated > MAX_NUMBER or calculated < MIN_NUMBER:
+        return -1
+
+    res = np.power(number, pow_value, dtype=np.int64)
+    return res
+```
+
+---
+
+### 15.보안 기능 결정에 사용되는 부적절한 입력값
+
+**응용 프로그램**이 **외부 입력값에 대한 신뢰를 전제로 보호 메커니즘을 사용**하는 경우, **공격자가 입력값을 조작할 수 있다면 보호 메커니즘을 우회**할 수 있다.
+개발자는 **흔히 쿠키, 환경변수, 히든필드 같은 입력값은 조작될 수 없다고 가정**한다. 하지만 **공격자는 다양한 방법으로 이러한 입력값을 변경할 수 있고, 조작된 내용은 탐지되지 않을 수 있다.**
+
+**인증(Authentication)이나 인가(Authorization)** 같은 **보안 결정이 쿠키, 환경변수, 히든필드 등에 기반해 수행**된다면, 공격자는 **입력값을 조작해 응용 프로그램의 보안을 우회**할 수 있다.
+따라서 **충분한 암호화와 무결성 체크를 수행**해야 하며, 이러한 메커니즘이 없다면 외부 사용자의 입력값을 신뢰해서는 안 된다.
+
+파이썬 **Django 프레임워크**는 **세션(Session) 관리 기능을 제공**한다.
+이 기능을 사용하면 **세션 쿠키의 만료 시점을 활용**할 수 있다.
+또한 **DRF(Django Rest Framework)가 제공하는 토큰(Token)과 세션 기능을 함께 사용**해 더 안전하게 구성할 수 있다.
+
+안전한 코딩 기법
+**상태 정보나 민감한 데이터, 특히 사용자 세션 정보 같은 중요 정보**는 서버에 저장하고 **보안 확인이 가능한 서버에서 처리**해야 한다.
+보안 설계 관점에서 **신뢰할 수 없는 입력값이 응용 프로그램 내부로 들어올 수 있는 지점을 검토**해야 한다.
+그리고 **민감한 보안 기능 실행에 사용되는 입력값을 식별**해, **그 입력값에 대한 의존성을 없애는 구조로 변경 가능한지 분석**해야 한다.
+
+쿠키에 저장된 권한 등급을 가져와 관리자인지 확인한 뒤 **사용자의 비밀번호를 초기화하고 메일을 보내는 예시**가 있다. 이 예시는 **쿠키에서 등급을 가져와 관리자 여부를 확인**한다.
+
+안전하지 않은 코드 예시
+
+```python
+from django.shortcuts import render
+
+def init_password(request):
+    # 쿠키에서 권한 정보를 가져온다.
+    role = request.COOKIES.get('role')
+    request_id = request.POST.get('user_id', '')
+    request_mail = request.POST.get('user_email', '')
+
+    # 쿠키에서 가져온 권한이 관리자인지 확인
+    if role == 'admin':
+        password_init_and_sendmail(request_id, request_mail)
+        return render(request, 'success.html')
+
+    return render(request, 'failed.html')
+```
+
+**중요 기능 수행을 위한 데이터**는 **위변조 가능성이 높은 쿠키보다 세션에 저장**하도록 한다.
+
+안전한 코드 예시는 다음과 같다.
+
+```python
+from django.shortcuts import render
+
+def init_password(request):
+    # 세션에서 권한 정보를 가져온다.
+    role = request.session.get('role')
+    request_id = request.POST.get('user_id', '')
+    request_mail = request.POST.get('user_email', '')
+
+    # 세션에서 가져온 권한이 관리자인지 확인
+    if role == 'admin':
+        password_init_and_sendmail(request_id, request_mail)
+        return render(request, 'success.html')
+
+    return render(request, 'failed.html')
+```
+
+---
+
+### 16. 포맷 스트링 삽입
+
+외부로부터 입력된 값을 검증하지 않고 **입출력 함수의 포맷 문자열로 그대로 사용하는 경우 발생할 수 있는 보안 약점**이다.
+공격자는 **문자열을 이용해 취약한 프로세스를 공격**하거나 **메모리 내용을 읽고 쓸 수 있다.** 이를 통해 **취약한 프로세스의 권한을 취득**해 **임의의 코드를 실행**할 수 있다.
+
+**파이썬은 문자열 포맷팅 방식으로 세 가지**를 제공한다.
+첫째는 **퍼센트 포맷팅(% formatting)**이다.
+둘째는 **str.format 방식**이다.
+셋째는 **f-string 방식**이다. **f-string**은 파이썬 3.6 버전부터 사용 가능하다.
+공격자는 **포맷 문자열을 이용해 내부 정보를 문자열로 만들 수 있으며**, 이를 그대로 사용하면 **중요 정보 유출로 이어질 수 있다.**
+
+안전한 코딩 기법
+포맷 문자열을 처리하는 함수를 사용할 때 **사용자 입력값을 직접 포맷 문자열로 사용하거나**, **포맷 문자열 생성에 포함시키지 않아야 한다**.
+사용자로부터 **입력받은 데이터를 포맷 문자열로 사용해야 한다면**, **서식 지정자를 포함하지 않도록 해야 한다.**
+또한 **파이썬 내장 함수 또는 내장 변수가 포함되지 않도록 해야 한다.**
+코드 예제에서는 **외부에서 입력받은 문자열을 바로 포맷 문자열로 사용**하고 있다.
+이 방식은 **내부 정보가 외부로 노출될 수 있는 문제를 내포**하고 있다.
+**공격자가 `#{user.__init__.__globals__[AUTHENTICATE_KEY]}` 형태의 문자열을 입력하면 전역 변수에 접근해 AUTHENTICATE_KEY 값을 탈취**할 수 있다.
+
+안전하지 않은 코드 예시
+```python
+from django.shortcuts import render
+
+AUTHENTICATE_KEY = 'Passwd0rd'
+
+def make_user_message(request):
+    user_info = get_user_info(request.POST.get('user_id', ''))
+    format_string = request.POST.get('msg_format', '')
+
+    # 사용자가 입력한 문자열을 포맷 문자열로 사용하므로 내부 민감 정보가 노출될 수 있다.
+    message = format_string.format(user=user_info)
+
+    return render(request, 'user_page.html', {'message': message})
+```
+
+**외부에서 입력받은 문자열**은 반드시 **포맷 지정자를 이용해 바인딩한 뒤 사용**해야 하며, **직접 포맷 문자열로 사용해서는 안 된다.**
+
+안전한 코드 예시
+
+```python
+from django.shortcuts import render
+
+AUTHENTICATE_KEY = 'Passwd0rd'
+
+def make_user_message(request):
+    user_info = get_user_info(request.POST.get('user_id', ''))
+
+    # 사용자가 입력한 문자열을 포맷 문자열로 사용하지 않는다.
+    message = 'user name is {}'.format(user_info.name)
+
+    return render(request, 'user_page.html', {'message': message})
+```
+---
+
  
